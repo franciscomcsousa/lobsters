@@ -7,6 +7,9 @@ pkgs.mkShell {
     rustfmt
     clippy
     rust-analyzer
+    # SDL2
+    SDL2
+    pkg-config
   ];
 
   RUST_BACKTRACE = 1;
