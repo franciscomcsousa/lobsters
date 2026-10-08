@@ -2,9 +2,9 @@ use std;
 use std::error::Error;
 use std::process::exit;
 
+mod cpu;
 mod memory_bus;
 mod ppu;
-mod cpu;
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Hello, world!");
@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Address Space: {:X?}", space);
 
-    let mut screen = ppu::Screen::new(); 
+    let mut screen = ppu::Screen::new();
     screen.render_loop();
 
     Ok(())

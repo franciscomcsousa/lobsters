@@ -1,5 +1,7 @@
 use rand::RngExt;
-use sdl2::{Sdl, event::Event, keyboard::Keycode, pixels::Color, rect::Point, render::WindowCanvas};
+use sdl2::{
+    Sdl, event::Event, keyboard::Keycode, pixels::Color, rect::Point, render::WindowCanvas,
+};
 use std::time::Duration;
 
 // TODO - maybe change this from usize to u8?
@@ -7,7 +9,7 @@ const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
 const SCALE: usize = 6;
 
-pub(crate) struct Screen {  
+pub(crate) struct Screen {
     pixels: [[u8; WIDTH]; HEIGHT],
     sdl_context: Sdl,
     canvas: WindowCanvas,
@@ -20,10 +22,11 @@ impl Screen {
         let real_width = (WIDTH * SCALE) as u32;
         let real_height = (HEIGHT * SCALE) as u32;
 
-        let window = video_subsystem.window("Lobsters", real_width, real_height)
-        .position_centered()
-        .build()
-        .unwrap();
+        let window = video_subsystem
+            .window("Lobsters", real_width, real_height)
+            .position_centered()
+            .build()
+            .unwrap();
 
         let mut canvas = window.into_canvas().build().unwrap();
         canvas.set_scale(SCALE as f32, SCALE as f32).unwrap();
@@ -49,22 +52,24 @@ impl Screen {
             for x in 0..WIDTH {
                 let color = Self::shade_to_color(self.pixels[y][x]);
                 self.canvas.set_draw_color(color);
-                self.canvas.draw_point(Point::new(x as i32, y as i32)).unwrap();
+                self.canvas
+                    .draw_point(Point::new(x as i32, y as i32))
+                    .unwrap();
             }
         }
         self.canvas.present();
     }
 
     pub fn render_loop(&mut self) {
-
         let mut event_pump = self.sdl_context.event_pump().unwrap();
         'running: loop {
             for event in event_pump.poll_iter() {
                 match event {
-                    Event::Quit {..} |
-                    Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
-                        break 'running
-                    },
+                    Event::Quit { .. }
+                    | Event::KeyDown {
+                        keycode: Some(Keycode::Escape),
+                        ..
+                    } => break 'running,
                     _ => {}
                 }
             }
@@ -82,4 +87,4 @@ impl Screen {
             _ => Color::RGB(0, 0, 0),
         }
     }
-} 
+}

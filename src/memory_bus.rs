@@ -40,4 +40,3 @@ impl MemoryBus {
         self.address_space[address as usize]
     }
 }
-
