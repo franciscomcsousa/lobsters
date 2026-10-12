@@ -272,7 +272,7 @@ impl Cpu {
 
         use AluOp::*;
         let mut result : u8 = 0;
-        let mut zero = false;
+        let zero;
         let mut sub = false;
         let mut half = false;
         let mut carry = false;
@@ -280,37 +280,55 @@ impl Cpu {
         match op {
             Add => {
                 (result, carry) = lhs.overflowing_add(rhs);
-                if result == 0 {
-                    zero = true;
-                }
-                if result > 0x15 {
-                    half = true;
-                }
-            },
+                half = (lhs & 0x0F) + (rhs & 0x0F) > 0x0F;
+             },
             Adc => {
                 let carry_add = carry as u8;
-                let mut c1 = false;
-                let mut c2 = false;
+                let c1;
+                let c2;
 
                 (result, c1) = lhs.overflowing_add(rhs);
                 (result, c2) = result.overflowing_add(carry_add);
                 
                 carry = c1 || c2;
-                if result == 0 {
-                    zero = true;
-                }
-                if result > 0x15 {
-                    half = true;
-                }
+                half = (lhs & 0x0F) + (rhs & 0x0F) > 0x0F;
             }
-            Sub => (),
-            Sbc => (),
-            And => (),
-            Xor => (),
-            Or => (),
-            Cp => (),
+            Sub => {
+                (result, carry) = lhs.overflowing_sub(rhs);
+                sub = true;
+                half = (rhs & 0x0F) > (lhs & 0x0F);
+            },
+            Sbc => {
+                let carry_sub = carry as u8;
+                let c1;
+                let c2;
+
+                (result, c1) = lhs.overflowing_sub(rhs);
+                (result, c2) = result.overflowing_sub(carry_sub);
+
+                carry = c1 || c2;
+                sub = true;
+                half = (rhs & 0x0F) + carry_sub > (lhs & 0x0F);
+            },
+            And => {
+                result = lhs & rhs;
+                half = true;
+            },
+            Xor => {
+                result = lhs ^ rhs;
+            },
+            Or => {
+                result = lhs | rhs;
+            },
+            Cp => {
+                (_, carry) = lhs.overflowing_sub(rhs);
+                sub = true;
+                half = (rhs & 0x0F) > (lhs & 0x0F);
+                result = lhs; // ComPare only sets flags
+            },
         }
 
+        zero = result == 0;
         self.registers.set_flags(zero, sub, half, carry);
         result
     }
@@ -398,6 +416,25 @@ impl Cpu {
             LdR8R8 { dest, src } => {
                 self.write_r8(dest, self.read_r8(src));
                 1
+            }
+
+            AluAR8 { operand, op } => {
+                let a_val = self.read_r8(Reg8::A);
+                let oprd_val = self.read_r8(operand);
+                let result = self.alu_r8(a_val, oprd_val, op);
+                self.write_r8(Reg8::A, result);
+                match operand {
+                    Reg8::HLMem => 2,
+                    _ => 1,
+                }
+            }
+
+            AluAImm8 { op } => {
+                let a_val = self.read_r8(Reg8::A);
+                let rhs_val = self.fetch8();
+                let result = self.alu_r8(a_val, rhs_val, op);
+                self.write_r8(Reg8::A, result);
+                2
             }
 
         }
