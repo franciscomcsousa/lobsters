@@ -113,13 +113,13 @@ impl Cpu {
             (0, _, 0x0) => match fields.y {
                 0x0 => Nop,
                 0x1 => LdImm16Sp,
-                0x2 => Stop,
-                0x3 => JrImm { cond: None },
-                _ => JrImm { cond: Some(cond) },
+                0x2 => StopInst,
+                0x3 => JrImm8 { cond: None },
+                _ => JrImm8 { cond: Some(cond) },
             },
             (0, _, 0x1) => {
                 match fields.q {
-                    0 => LdR16Imm { dst: reg16_reg },
+                    0 => LdR16Imm16 { dst: reg16_reg },
                     _ => AddHlR16 { operand: reg16_reg }, // 1
                 }
             }
@@ -139,9 +139,9 @@ impl Cpu {
                     _ => DecR16 { operand: reg16_reg }, // 1
                 }
             }
-            (0, _, 0x4) => IncR { operand: reg8_y },
-            (0, _, 0x5) => DecR { operand: reg8_y },
-            (0, _, 0x6) => LdRImm { dest: reg8_y },
+            (0, _, 0x4) => IncR8 { operand: reg8_y },
+            (0, _, 0x5) => DecR8 { operand: reg8_y },
+            (0, _, 0x6) => LdR8Imm8 { dest: reg8_y },
             (0, _, 0x7) => {
                 if fields.y < 0x4 {
                     RotA {
@@ -155,13 +155,13 @@ impl Cpu {
             }
 
             // Block 1
-            (1, _, _) => LdRR {
+            (1, _, _) => LdR8R8 {
                 dest: reg8_y,
                 src: reg8_z,
             },
 
             // Block 2
-            (2, _, _) => AluR {
+            (2, _, _) => AluAR8 {
                 operand: reg8_z,
                 op: AluOp::from_index(fields.y),
             },
@@ -173,13 +173,13 @@ impl Cpu {
                 } else {
                     match fields.y {
                         0x4 => StoreA {
-                            addr: LoadAddr::Imm,
+                            addr: LoadAddr::Imm8,
                         },
-                        0x5 => AddSpImm,
+                        0x5 => AddSpImm8,
                         0x6 => LoadA {
-                            addr: LoadAddr::Imm,
+                            addr: LoadAddr::Imm8,
                         },
-                        _ => LdHlSpImm, // 0x7
+                        _ => LdHlSpImm8, // 0x7
                     }
                 }
             }
@@ -247,7 +247,7 @@ impl Cpu {
                 }
             }
 
-            (3, _, 0x6) => AluAImm {
+            (3, _, 0x6) => AluAImm8 {
                 op: AluOp::from_index(fields.y),
             },
 
@@ -258,16 +258,149 @@ impl Cpu {
         }
     }
 
-    fn execute(&mut self, instruction: Instruction) {
+    fn match_condition(&self, cond: Option<Cond>) -> bool {
+        match cond {
+            None => true,
+            Some(Cond::NZ) => !self.registers.flag_zero(),
+            Some(Cond::Z) => self.registers.flag_zero(),
+            Some(Cond::NC) => !self.registers.flag_carry(),
+            Some(Cond::C) => self.registers.flag_carry(),
+        }
+    }
+
+    fn alu_r8(&mut self, lhs: u8, rhs: u8, op: AluOp) -> u8 {
+
+        use AluOp::*;
+        let mut result : u8 = 0;
+        let mut zero = false;
+        let mut sub = false;
+        let mut half = false;
+        let mut carry = false;
+
+        match op {
+            Add => {
+                (result, carry) = lhs.overflowing_add(rhs);
+                if result == 0 {
+                    zero = true;
+                }
+                if result > 0x15 {
+                    half = true;
+                }
+            },
+            Adc => {
+                let carry_add = carry as u8;
+                let mut c1 = false;
+                let mut c2 = false;
+
+                (result, c1) = lhs.overflowing_add(rhs);
+                (result, c2) = result.overflowing_add(carry_add);
+                
+                carry = c1 || c2;
+                if result == 0 {
+                    zero = true;
+                }
+                if result > 0x15 {
+                    half = true;
+                }
+            }
+            Sub => (),
+            Sbc => (),
+            And => (),
+            Xor => (),
+            Or => (),
+            Cp => (),
+        }
+
+        self.registers.set_flags(zero, sub, half, carry);
+        result
+    }
+
+    fn execute(&mut self, instruction: Instruction) -> u8 {
         use Instruction::*;
 
-        // match instruction {
-        //     Nop => (),
-        //     LdImm16Sp => (),
-        //     LdR16Imm { dst } => (),
-        //     LdMemA { dst_addr } => (),
-        //     LdAMem { src_addr } => (),
-        // }
+        match instruction {
+            Nop => 1,
+            LdR16Imm16 { dst } => {
+                let val = self.fetch16();
+                self.write_r16(dst, val);
+                3
+            }
+
+            // TODO LdMemA { dst_addr } => (),
+            // TODO LdAMem { src_addr } => (),
+            
+            LdImm16Sp => {
+                let sp = self.read_r16(Reg16::SP);
+                let lo = (sp & 0xFF) as u8;
+                let hi = (sp >> 8) as u8;
+                let addr = self.fetch16();
+                self.bus.write(addr, lo);
+                self.bus.write(addr + 1, hi);
+                5
+            }
+
+            IncR16 { operand } => {
+                let val = self.read_r16(operand);
+                self.write_r16(operand, val + 1);
+                2
+            }
+
+            DecR16 { operand } => {
+                let val = self.read_r16(operand);
+                self.write_r16(operand, val - 1);
+                2
+            }
+
+            AddHlR16 { operand } => {
+                let val = self.read_r16(operand) + self.read_r16(Reg16::HL);
+                self.write_r16(Reg16::HL, val);
+                2
+            }
+
+            IncR8 { operand } => {
+                let val = self.read_r8(operand);
+                self.write_r8(operand, val + 1);
+                1
+            }
+
+            DecR8 { operand } => {
+                let val = self.read_r8(operand);
+                self.write_r8(operand, val - 1);
+                1
+            }
+
+            LdR8Imm8 { dest } => {
+                let val = self.fetch8();
+                self.write_r8(dest, val);
+                2
+            }
+
+            // TODO RotA { op } => {}
+            // TODO AccFlag { op }
+
+            JrImm8 { cond } => {
+                // The jump is relative to a signed number
+                if self.match_condition(cond) {
+                    let offset = self.fetch8() as i8;
+                    self.registers.pc = self.registers.pc.wrapping_add_signed(offset as i16);
+                    3
+                } else {
+                    2
+                }
+            }
+
+            // Used mainly for CGB to change clock speed - ambiguous intruction
+            StopInst => {
+                self.fetch8(); // discard padding byte
+                1
+            }
+
+            LdR8R8 { dest, src } => {
+                self.write_r8(dest, self.read_r8(src));
+                1
+            }
+
+        }
     }
 }
 
@@ -337,6 +470,30 @@ impl Registers {
         self.h = (val >> 8) as u8;
         self.l = val as u8;
     }
+
+    pub fn flag_zero(&self) -> bool {
+        (self.f >> 7) & 1 != 0
+    }
+
+    pub fn flag_sub(&self) -> bool {
+        (self.f >> 6) & 1 != 0
+    }
+
+    pub fn flag_half(&self) -> bool {
+        (self.f >> 5) & 1 != 0
+    }
+
+    pub fn flag_carry(&self) -> bool {
+        (self.f >> 4) & 1 != 0
+    }
+
+    pub fn set_flags(&mut self, z: bool, n: bool, h: bool, c: bool) {
+        let mut new: u8 = 0;
+        for flag in [z, n, h, c] {
+            new = (new << 1) | (flag as u8);
+        }
+        self.f = new << 4;
+    }
 }
 
 // Logic based on the contents from https://www.z80.info/decoding.htm
@@ -405,14 +562,14 @@ impl Reg16 {
 #[derive(Clone, Copy)]
 enum Cond {
     NZ,
-    N,
+    Z,
     NC,
     C,
 }
 
 impl Cond {
     fn from_index(index: u8) -> Self {
-        [Self::NZ, Self::N, Self::NC, Self::C][index as usize]
+        [Self::NZ, Self::Z, Self::NC, Self::C][index as usize]
     }
 }
 
@@ -487,7 +644,7 @@ impl RotShiftOp {
 #[derive(Clone, Copy)]
 enum LoadAddr {
     C,
-    Imm,
+    Imm8,
     Imm16,
 }
 
@@ -495,7 +652,7 @@ enum Instruction {
     Nop,
     // Loads
     // Block 0
-    LdR16Imm { dst: Reg16 },
+    LdR16Imm16 { dst: Reg16 },
     LdMemA { dst_addr: Reg16 },
     LdAMem { src_addr: Reg16 },
     LdImm16Sp,
@@ -504,25 +661,25 @@ enum Instruction {
     DecR16 { operand: Reg16 },
     AddHlR16 { operand: Reg16 },
 
-    IncR { operand: Reg8 },
-    DecR { operand: Reg8 },
+    IncR8 { operand: Reg8 },
+    DecR8 { operand: Reg8 },
 
-    LdRImm { dest: Reg8 },
+    LdR8Imm8 { dest: Reg8 },
 
     RotA { op: RotShiftOp },
     AccFlag { op: AccFlagOp },
 
-    JrImm { cond: Option<Cond> },
-    Stop,
+    JrImm8 { cond: Option<Cond> },
+    StopInst,
 
     // Block 1
-    LdRR { dest: Reg8, src: Reg8 },
+    LdR8R8 { dest: Reg8, src: Reg8 },
 
     // Block 2
-    AluR { operand: Reg8, op: AluOp },
+    AluAR8 { operand: Reg8, op: AluOp },
 
     // Block 3
-    AluAImm { op: AluOp },
+    AluAImm8 { op: AluOp },
 
     Ret { cond: Option<Cond> },
     Reti,
@@ -546,8 +703,8 @@ enum Instruction {
     StoreA { addr: LoadAddr },
     LoadA { addr: LoadAddr },
 
-    AddSpImm,
-    LdHlSpImm,
+    AddSpImm8,
+    LdHlSpImm8,
     LdSpHl,
 
     Di,
