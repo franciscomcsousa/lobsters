@@ -1,9 +1,15 @@
 use crate::memory_bus::MemoryBus;
 use std::ops::{Index, IndexMut};
 
+const BIT_7_MASK: u8 = 0b1000_0000;
+const BIT_6_MASK: u8 = 0b0100_0000;
+const BIT_5_MASK: u8 = 0b0010_0000;
+const BIT_4_MASK: u8 = 0b0001_0000;
+
 pub(crate) struct Cpu {
     registers: Registers,
     bus: MemoryBus,
+    flag_ime: bool,
 }
 
 impl Cpu {
@@ -11,6 +17,7 @@ impl Cpu {
         Cpu {
             registers: Registers::new(),
             bus: MemoryBus::new(),
+            flag_ime: false,
         }
     }
 
@@ -86,6 +93,28 @@ impl Cpu {
             HLD => self.registers.set_hl(val), //TODO
             HLI => self.registers.set_hl(val), //TODO
         };
+    }
+
+    fn cb_decode(&self, instruction: u8) -> CBInstruction {
+        let fields = OpFields {
+            x: instruction >> 6,
+            y: (instruction >> 3) & 0b0111,
+            z: (instruction & 0b0111),
+            p: (instruction >> 4) & 0b0011,
+            q: (instruction >> 3) & 0b0001,
+        };
+
+        use CBInstruction::*;
+
+        let operand = Reg8::from_index(fields.z);
+
+        match (fields.x, fields.y, fields.z) {
+            (0, _, _) => CBRot { op: RotShiftOp::from_index(fields.y), operand: operand},
+            (1, _, _) => CBBit { bit_index: fields.y, operand: operand },
+            (2, _, _) => CBRes { bit_index: fields.y, operand: operand },
+            (3, _, _) => CBSet { bit_index: fields.y, operand: operand },
+            (_,_,_) => Invalid,
+        }
     }
 
     fn decode(instruction: u8) -> Instruction {
@@ -169,7 +198,7 @@ impl Cpu {
             // Block 3
             (3, _, 0x0) => {
                 if fields.y < 0x4 {
-                    Ret { cond: Some(cond) }
+                    Ret { cond: Some(cond), ime: false }
                 } else {
                     match fields.y {
                         0x4 => StoreA {
@@ -190,8 +219,8 @@ impl Cpu {
                     _ => {
                         // 1
                         match fields.p {
-                            0x0 => Ret { cond: None },
-                            0x1 => Reti,
+                            0x0 => Ret { cond: None, ime: false },
+                            0x1 => Ret { cond: None, ime: true },
                             0x2 => JpHl,
                             _ => LdSpHl, // 0x3
                         }
@@ -251,7 +280,7 @@ impl Cpu {
                 op: AluOp::from_index(fields.y),
             },
 
-            (3, _, 0x7) => Rst { target: fields.y },
+            (3, _, 0x7) => Rst { address: fields.y * 8 },
 
             // Safeguard, this should never happen
             (_, _, _) => Invalid,
@@ -269,9 +298,8 @@ impl Cpu {
     }
 
     fn alu_r8(&mut self, lhs: u8, rhs: u8, op: AluOp) -> u8 {
-
         use AluOp::*;
-        let mut result : u8 = 0;
+        let mut result: u8;
         let zero;
         let mut sub = false;
         let mut half = false;
@@ -281,7 +309,7 @@ impl Cpu {
             Add => {
                 (result, carry) = lhs.overflowing_add(rhs);
                 half = (lhs & 0x0F) + (rhs & 0x0F) > 0x0F;
-             },
+            }
             Adc => {
                 let carry_add = carry as u8;
                 let c1;
@@ -289,7 +317,7 @@ impl Cpu {
 
                 (result, c1) = lhs.overflowing_add(rhs);
                 (result, c2) = result.overflowing_add(carry_add);
-                
+
                 carry = c1 || c2;
                 half = (lhs & 0x0F) + (rhs & 0x0F) > 0x0F;
             }
@@ -297,7 +325,7 @@ impl Cpu {
                 (result, carry) = lhs.overflowing_sub(rhs);
                 sub = true;
                 half = (rhs & 0x0F) > (lhs & 0x0F);
-            },
+            }
             Sbc => {
                 let carry_sub = carry as u8;
                 let c1;
@@ -309,28 +337,118 @@ impl Cpu {
                 carry = c1 || c2;
                 sub = true;
                 half = (rhs & 0x0F) + carry_sub > (lhs & 0x0F);
-            },
+            }
             And => {
                 result = lhs & rhs;
                 half = true;
-            },
+            }
             Xor => {
                 result = lhs ^ rhs;
-            },
+            }
             Or => {
                 result = lhs | rhs;
-            },
+            }
             Cp => {
                 (_, carry) = lhs.overflowing_sub(rhs);
                 sub = true;
                 half = (rhs & 0x0F) > (lhs & 0x0F);
                 result = lhs; // ComPare only sets flags
-            },
+            }
         }
 
         zero = result == 0;
         self.registers.set_flags(zero, sub, half, carry);
         result
+    }
+
+    fn rot_shift_r8(&mut self, reg8: Reg8, op: RotShiftOp) -> u8 {
+        use RotShiftOp::*;
+
+        let value = self.read_r8(reg8);
+        let result: u8;
+        let mut carry = false;
+
+        match op {
+            Rlc => {
+                carry = value & BIT_7_MASK != 0;
+                result = value.rotate_left(1);
+            }
+            Rrc => {
+                carry = value & 0b1 != 0;
+                result = value.rotate_right(1);
+            }
+            Rl => {
+                let old_carry = self.registers.flag_carry() as u8;
+                carry = value & BIT_7_MASK != 0;
+                result = (value << 1) | old_carry;
+            }
+            Rr => {
+                let old_carry = self.registers.flag_carry() as u8;
+                carry = value & 0b1 != 0;
+                result = (value >> 1) | (old_carry << 7);
+            }
+            Sla => {
+                carry = value & BIT_7_MASK != 0;
+                result = value << 1;
+            }
+            Sra => {
+                let b7 = value & BIT_7_MASK;
+                carry = value & 0b1 != 0;
+                result = (value >> 1) | b7;
+            }
+            Swap => {
+                let hi = value >> 4;
+                let lo = value & 0xF;
+                result = (lo << 4) | hi;
+            }
+            Srl => {
+                carry = value & 0b1 != 0;
+                result = value >> 1;
+            }
+        }
+
+        let zero;
+        match reg8 {
+            Reg8::A => zero = false,
+            _ => zero = result == 0,
+        }
+        self.registers.set_flags(zero, false, false, carry);
+
+        result
+    }
+
+    fn pop_stack(&mut self) -> u16 {
+        let hi;
+        let lo;
+        let mut sp = self.read_r16(Reg16::SP);
+
+        lo = self.bus.read(sp);
+        sp = sp.wrapping_add(1);
+        hi = self.bus.read(sp);
+        sp = sp.wrapping_add(1);
+        
+        // Write back the new value for SP
+        self.write_r16(Reg16::SP, sp);
+
+        ((hi as u16) << 8) | lo as u16
+    }
+
+    fn push_stack(&mut self, val: u16) {
+        let hi;
+        let lo;
+        let mut sp = self.read_r16(Reg16::SP);
+
+        let value = self.read_r16(reg);
+
+        sp.wrapping_sub(1);
+        hi = ((value & 0xFF00) >> 8) as u8;
+        self.bus.write(sp, hi);
+        sp.wrapping_sub(1);
+        lo = (value & 0xFF) as u8;
+        self.bus.write(sp, lo);
+
+        // Write back the new value for SP
+        self.write_r16(Reg16::SP, sp);
     }
 
     fn execute(&mut self, instruction: Instruction) -> u8 {
@@ -343,10 +461,21 @@ impl Cpu {
                 self.write_r16(dst, val);
                 3
             }
-
-            // TODO LdMemA { dst_addr } => (),
-            // TODO LdAMem { src_addr } => (),
             
+            LdMemA { dst_addr } => {
+                let value = self.read_r8(Reg8::A);
+                let address = self.fetch16();
+                self.bus.write(address, value);
+                4
+            }
+
+            LdAMem { src_addr } => {
+                let address = self.fetch16();
+                let value = self.bus.read(address);
+                self.write_r8(Reg8::A, value);
+                4
+            }
+
             LdImm16Sp => {
                 let sp = self.read_r16(Reg16::SP);
                 let lo = (sp & 0xFF) as u8;
@@ -393,8 +522,59 @@ impl Cpu {
                 2
             }
 
-            // TODO RotA { op } => {}
-            // TODO AccFlag { op }
+            RotA { op } => {
+                let val = self.rot_shift_r8(Reg8::A, op);
+                self.write_r8(Reg8::A, val);
+                1
+            }
+
+            AccFlag { op } => {
+                use AccFlagOp::*;
+
+                match op {
+                    Daa => {
+                        let mut adjustment = 0;
+
+                        let mut carry = self.registers.flag_carry();
+                        let half = self.registers.flag_half();
+                        let sub = self.registers.flag_sub();
+
+                        let val_a = self.read_r8(Reg8::A);
+                        let result;
+                        if sub {
+                            if half {
+                                adjustment += 0x6;
+                            }
+                            if carry {
+                                adjustment += 0x60;
+                            }
+                            result = val_a.wrapping_sub(adjustment);
+                        } else {
+                            if half || val_a & 0xF > 0x9 {
+                                adjustment += 0x6;
+                            }
+                            if carry || val_a > 0x99 {
+                                adjustment += 0x60;
+                                carry = true;
+                            }
+                            result = val_a.wrapping_add(adjustment);
+                        }
+                        self.write_r8(Reg8::A, result);
+                        self.registers.set_flags(result == 0, sub, false, carry);
+                    }
+                    Cpl => {
+                        let val = self.read_r8(Reg8::A);
+                        self.write_r8(Reg8::A, !val);
+                    }
+                    Scf => {
+                        self.registers.set_carry(true);
+                    }
+                    Ccf => {
+                        self.registers.set_carry(!self.registers.flag_carry());
+                    }
+                }
+                1
+            }
 
             JrImm8 { cond } => {
                 // The jump is relative to a signed number
@@ -435,6 +615,107 @@ impl Cpu {
                 let result = self.alu_r8(a_val, rhs_val, op);
                 self.write_r8(Reg8::A, result);
                 2
+            }
+
+            Ret { cond, ime } => {
+                let mut cycles = 2;
+                if self.match_condition(cond) {
+                    self.registers.pc = self.pop_stack();
+                    match cond {
+                        None => cycles = 4,
+                        _ => cycles = 5,
+                    }
+                }
+                if ime {
+                    self.flag_ime = true;
+                }
+                cycles
+            }
+
+            JpImm16 { cond } => {
+                if self.match_condition(cond) {
+                    let addr = self.fetch16();
+                    self.registers.pc = addr;
+                    4
+                } else {
+                    3
+                }
+            }
+
+            JpHl => {
+                let value = self.read_r16(Reg16::HL);
+                self.registers.pc = value;
+                1
+            }
+
+            CallImm16 { cond } => {
+                let addr = self.fetch16();
+                if self.match_condition(cond) {
+                    let ret_addr = self.registers.pc;
+                    self.push_stack(ret_addr);
+                    self.registers.pc = addr;
+                    6
+                } else {
+                    3
+                }
+            }
+
+            Rst { address } => {
+                let ret_addr = self.registers.pc;
+                self.push_stack(ret_addr);
+                self.registers.pc = address as u16;
+                4
+            }
+
+            Pop { reg } => {
+                let value = self.pop_stack(); 
+                self.write_r16(reg, value);
+                3
+            }
+
+            Push { reg } => {
+                let value = self.read_r16(reg);
+                self.push_stack(value);
+                4
+            }
+
+            CbInst => {
+                let instr = self.fetch8();
+                let cb_instr = self.cb_decode(instr);
+                use CBInstruction::*;
+                match cb_instr {
+
+                    CBRot { op, operand } => {
+                        let val = self.rot_shift_r8(operand, op);
+                        self.write_r8(operand, val);
+                        if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
+                    }
+
+                    CBBit { bit_index, operand } => {
+                        let mut val = self.read_r8(operand);
+                        let mask = 0b1 << bit_index;
+                        let zero = (val & mask) == 0;
+                        let carry = self.registers.flag_carry();
+                        self.registers.set_flags(zero, false, true, carry);
+                        if matches!(operand, Reg8::HLMem) { 3 } else { 2 }
+                    }
+
+                    CBRes { bit_index, operand } => {
+                        let mut val = self.read_r8(operand);
+                        let mask = 0b1 << bit_index;
+                        val = val & !mask;
+                        if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
+                    }
+
+                    CBSet { bit_index, operand } => {
+                        let mut val = self.read_r8(operand);
+                        let mask = 0b1 << bit_index;
+                        val = val | mask;
+                        if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
+                    }
+
+                    Invalid => 0,
+                }
             }
 
         }
@@ -509,19 +790,23 @@ impl Registers {
     }
 
     pub fn flag_zero(&self) -> bool {
-        (self.f >> 7) & 1 != 0
+        self.f & BIT_7_MASK == 1
     }
 
     pub fn flag_sub(&self) -> bool {
-        (self.f >> 6) & 1 != 0
+        self.f & BIT_6_MASK == 1
     }
 
     pub fn flag_half(&self) -> bool {
-        (self.f >> 5) & 1 != 0
+        self.f & BIT_5_MASK == 1
     }
 
     pub fn flag_carry(&self) -> bool {
-        (self.f >> 4) & 1 != 0
+        self.f & BIT_4_MASK == 1
+    }
+
+    pub fn set_carry(&mut self, val: bool) {
+        self.set_flags(self.flag_zero(), self.flag_sub(), self.flag_half(), val);
     }
 
     pub fn set_flags(&mut self, z: bool, n: bool, h: bool, c: bool) {
@@ -718,24 +1003,16 @@ enum Instruction {
     // Block 3
     AluAImm8 { op: AluOp },
 
-    Ret { cond: Option<Cond> },
-    Reti,
+    Ret { cond: Option<Cond>, ime: bool },
     JpImm16 { cond: Option<Cond> },
     JpHl,
     CallImm16 { cond: Option<Cond> },
-    Rst { target: u8 },
+    Rst { address: u8 },
 
     Pop { reg: Reg16 },
     Push { reg: Reg16 },
 
     CbInst,
-
-    // TODO - use in cb_decode() function perhaps
-    // Not enough info in decode() to choose
-    CBRot { op: RotShiftOp, operand: Reg8 },
-    CBBit { bit_index: u8, operand: Reg8 },
-    CBRes { bit_index: u8, operand: Reg8 },
-    CBSet { bit_index: u8, operand: Reg8 },
 
     StoreA { addr: LoadAddr },
     LoadA { addr: LoadAddr },
@@ -746,6 +1023,15 @@ enum Instruction {
 
     Di,
     Ei,
+
+    Invalid,
+}
+
+enum CBInstruction {
+    CBRot { op: RotShiftOp, operand: Reg8 },
+    CBBit { bit_index: u8, operand: Reg8 },
+    CBRes { bit_index: u8, operand: Reg8 },
+    CBSet { bit_index: u8, operand: Reg8 },
 
     Invalid,
 }
