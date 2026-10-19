@@ -1,5 +1,4 @@
 use crate::memory_bus::MemoryBus;
-use std::ops::{Index, IndexMut};
 
 const BIT_7_MASK: u8 = 0b1000_0000;
 const BIT_6_MASK: u8 = 0b0100_0000;
@@ -80,8 +79,16 @@ impl Cpu {
             HL => self.registers.hl(),
             SP => self.registers.sp,
             AF => self.registers.af(),
-            HLD => self.registers.hl(), //TODO
-            HLI => self.registers.hl(), //TODO
+            HLD => {
+                let ret = self.registers.hl();
+                self.registers.set_hl(ret.wrapping_sub(1));
+                ret
+            }
+            HLI => {
+                let ret = self.registers.hl();
+                self.registers.set_hl(ret.wrapping_add(1));
+                ret
+            }
         }
     }
 
@@ -94,8 +101,7 @@ impl Cpu {
             HL => self.registers.set_hl(val),
             SP => self.registers.sp = val,
             AF => self.registers.set_af(val),
-            HLD => self.registers.set_hl(val), //TODO
-            HLI => self.registers.set_hl(val), //TODO
+            _ => (), // HLD and HLI should never be written into
         };
     }
 
@@ -113,11 +119,23 @@ impl Cpu {
         let operand = Reg8::from_index(fields.z);
 
         match (fields.x, fields.y, fields.z) {
-            (0, _, _) => Rot { op: RotShiftOp::from_index(fields.y), operand: operand},
-            (1, _, _) => Bit { bit_index: fields.y, operand: operand },
-            (2, _, _) => Res { bit_index: fields.y, operand: operand },
-            (3, _, _) => Set { bit_index: fields.y, operand: operand },
-            (_,_,_) => Invalid,
+            (0, _, _) => Rot {
+                op: RotShiftOp::from_index(fields.y),
+                operand: operand,
+            },
+            (1, _, _) => Bit {
+                bit_index: fields.y,
+                operand: operand,
+            },
+            (2, _, _) => Res {
+                bit_index: fields.y,
+                operand: operand,
+            },
+            (3, _, _) => Set {
+                bit_index: fields.y,
+                operand: operand,
+            },
+            (_, _, _) => Invalid,
         }
     }
 
@@ -141,8 +159,6 @@ impl Cpu {
 
         match (fields.x, fields.y, fields.z) {
             // Block 0
-            // (0,0,0) => Nop,
-            // (0,0x1,0x0) => LdImm16Sp,
             (0, _, 0x0) => match fields.y {
                 0x0 => Nop,
                 0x1 => LdImm16Sp,
@@ -202,7 +218,10 @@ impl Cpu {
             // Block 3
             (3, _, 0x0) => {
                 if fields.y < 0x4 {
-                    Ret { cond: Some(cond), ime: false }
+                    Ret {
+                        cond: Some(cond),
+                        ime: false,
+                    }
                 } else {
                     match fields.y {
                         0x4 => StoreA {
@@ -223,8 +242,14 @@ impl Cpu {
                     _ => {
                         // 1
                         match fields.p {
-                            0x0 => Ret { cond: None, ime: false },
-                            0x1 => Ret { cond: None, ime: true },
+                            0x0 => Ret {
+                                cond: None,
+                                ime: false,
+                            },
+                            0x1 => Ret {
+                                cond: None,
+                                ime: true,
+                            },
                             0x2 => JpHl,
                             _ => LdSpHl, // 0x3
                         }
@@ -237,11 +262,15 @@ impl Cpu {
                     JpImm16 { cond: Some(cond) }
                 } else {
                     match fields.y {
-                        0x4 => StoreA { load_type: LoadType::C },
+                        0x4 => StoreA {
+                            load_type: LoadType::C,
+                        },
                         0x5 => StoreA {
                             load_type: LoadType::Imm16,
                         },
-                        0x6 => LoadA { load_type: LoadType::C },
+                        0x6 => LoadA {
+                            load_type: LoadType::C,
+                        },
                         _ => LoadA {
                             load_type: LoadType::Imm16,
                         }, // 0x7
@@ -249,15 +278,13 @@ impl Cpu {
                 }
             }
 
-            (3, _, 0x3) => {
-                match fields.y {
-                    0x0 => JpImm16 { cond: None },
-                    0x1 => CbInst, // TODO - CB instructions
-                    0x6 => Di,
-                    0x7 => Ei,
-                    _ => Invalid,
-                }
-            }
+            (3, _, 0x3) => match fields.y {
+                0x0 => JpImm16 { cond: None },
+                0x1 => CbInst,
+                0x6 => Di,
+                0x7 => Ei,
+                _ => Invalid,
+            },
 
             (3, _, 0x4) => {
                 if fields.y < 0x4 {
@@ -284,7 +311,9 @@ impl Cpu {
                 op: AluOp::from_index(fields.y),
             },
 
-            (3, _, 0x7) => Rst { address: fields.y * 8 },
+            (3, _, 0x7) => Rst {
+                address: fields.y * 8,
+            },
 
             // Safeguard, this should never happen
             (_, _, _) => unreachable!(),
@@ -430,24 +459,22 @@ impl Cpu {
         sp = sp.wrapping_add(1);
         hi = self.bus.read(sp);
         sp = sp.wrapping_add(1);
-        
+
         // Write back the new value for SP
         self.write_r16(Reg16::SP, sp);
 
         ((hi as u16) << 8) | lo as u16
     }
 
-    fn push_stack(&mut self, val: u16) {
+    fn push_stack(&mut self, value: u16) {
         let hi;
         let lo;
         let mut sp = self.read_r16(Reg16::SP);
 
-        let value = self.read_r16(reg);
-
-        sp.wrapping_sub(1);
+        sp = sp.wrapping_sub(1);
         hi = ((value & 0xFF00) >> 8) as u8;
         self.bus.write(sp, hi);
-        sp.wrapping_sub(1);
+        sp = sp.wrapping_sub(1);
         lo = (value & 0xFF) as u8;
         self.bus.write(sp, lo);
 
@@ -456,15 +483,14 @@ impl Cpu {
     }
 
     fn get_ld_address(&mut self, load_type: LoadType) -> (u8, u16) {
-
         use LoadType::*;
-        let addr : u16;
+        let addr: u16;
         let cycles: u8;
         match load_type {
             C => {
-                addr = 0xFF00 | self.registers.c as u16; 
+                addr = 0xFF00 | self.registers.c as u16;
                 cycles = 2;
-            } 
+            }
             Imm8 => {
                 let imm = self.fetch16();
                 addr = 0xFF00 & imm as u16;
@@ -477,10 +503,9 @@ impl Cpu {
         }
         (cycles, addr)
     }
-    
 
     fn signed_add_sp_imm8(&mut self) {
-        let val = self.fetch8(); 
+        let val = self.fetch8();
         let sp = self.registers.sp;
 
         let half = (sp & 0x000F) + (val as u16 & 0x000F) > 0x000F;
@@ -500,7 +525,7 @@ impl Cpu {
                 self.write_r16(dst, val);
                 3
             }
-            
+
             // TODO - perhaps move these two to LoadA and StoreA repectively
             LdMemA { dst_addr } => {
                 let value = self.read_r8(Reg8::A);
@@ -634,7 +659,8 @@ impl Cpu {
             }
 
             LdR8R8 { dest, src } => {
-                self.write_r8(dest, self.read_r8(src));
+                let val = self.read_r8(src);
+                self.write_r8(dest, val);
                 1
             }
 
@@ -708,7 +734,7 @@ impl Cpu {
             }
 
             Pop { reg } => {
-                let value = self.pop_stack(); 
+                let value = self.pop_stack();
                 self.write_r16(reg, value);
                 3
             }
@@ -724,7 +750,6 @@ impl Cpu {
                 let cb_instr = self.cb_decode(instr);
                 use CBInstruction::*;
                 match cb_instr {
-
                     Rot { op, operand } => {
                         let val = self.rot_shift_r8(operand, op);
                         self.write_r8(operand, val);
@@ -732,7 +757,7 @@ impl Cpu {
                     }
 
                     Bit { bit_index, operand } => {
-                        let mut val = self.read_r8(operand);
+                        let val = self.read_r8(operand);
                         let mask = 0b1 << bit_index;
                         let zero = (val & mask) == 0;
                         let carry = self.registers.flag_carry();
@@ -741,16 +766,16 @@ impl Cpu {
                     }
 
                     Res { bit_index, operand } => {
-                        let mut val = self.read_r8(operand);
+                        let val = self.read_r8(operand);
                         let mask = 0b1 << bit_index;
-                        val = val & !mask;
+                        self.write_r8(operand, val & !mask);
                         if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
                     }
 
                     Set { bit_index, operand } => {
-                        let mut val = self.read_r8(operand);
+                        let val = self.read_r8(operand);
                         let mask = 0b1 << bit_index;
-                        val = val | mask;
+                        self.write_r8(operand, val | mask);
                         if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
                     }
 
@@ -766,7 +791,7 @@ impl Cpu {
                 let val = self.read_r8(Reg8::A);
                 self.bus.write(address, val);
                 cycles
-            } 
+            }
 
             StoreA { load_type } => {
                 let cycles;
@@ -811,9 +836,6 @@ impl Cpu {
         }
     }
 }
-
-
-
 
 struct Registers {
     a: u8,
@@ -1065,7 +1087,6 @@ enum LoadType {
 
 enum Instruction {
     Nop,
-    // Loads
     // Block 0
     LdR16Imm16 { dst: Reg16 },
     LdMemA { dst_addr: Reg16 },
