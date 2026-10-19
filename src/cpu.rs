@@ -10,6 +10,8 @@ pub(crate) struct Cpu {
     registers: Registers,
     bus: MemoryBus,
     flag_ime: bool,
+    pending_ime: bool,
+    locked: bool,
 }
 
 impl Cpu {
@@ -18,6 +20,8 @@ impl Cpu {
             registers: Registers::new(),
             bus: MemoryBus::new(),
             flag_ime: false,
+            pending_ime: false,
+            locked: false,
         }
     }
 
@@ -109,10 +113,10 @@ impl Cpu {
         let operand = Reg8::from_index(fields.z);
 
         match (fields.x, fields.y, fields.z) {
-            (0, _, _) => CBRot { op: RotShiftOp::from_index(fields.y), operand: operand},
-            (1, _, _) => CBBit { bit_index: fields.y, operand: operand },
-            (2, _, _) => CBRes { bit_index: fields.y, operand: operand },
-            (3, _, _) => CBSet { bit_index: fields.y, operand: operand },
+            (0, _, _) => Rot { op: RotShiftOp::from_index(fields.y), operand: operand},
+            (1, _, _) => Bit { bit_index: fields.y, operand: operand },
+            (2, _, _) => Res { bit_index: fields.y, operand: operand },
+            (3, _, _) => Set { bit_index: fields.y, operand: operand },
             (_,_,_) => Invalid,
         }
     }
@@ -202,11 +206,11 @@ impl Cpu {
                 } else {
                     match fields.y {
                         0x4 => StoreA {
-                            addr: LoadAddr::Imm8,
+                            load_type: LoadType::Imm8,
                         },
                         0x5 => AddSpImm8,
                         0x6 => LoadA {
-                            addr: LoadAddr::Imm8,
+                            load_type: LoadType::Imm8,
                         },
                         _ => LdHlSpImm8, // 0x7
                     }
@@ -233,13 +237,13 @@ impl Cpu {
                     JpImm16 { cond: Some(cond) }
                 } else {
                     match fields.y {
-                        0x4 => StoreA { addr: LoadAddr::C },
+                        0x4 => StoreA { load_type: LoadType::C },
                         0x5 => StoreA {
-                            addr: LoadAddr::Imm16,
+                            load_type: LoadType::Imm16,
                         },
-                        0x6 => LoadA { addr: LoadAddr::C },
+                        0x6 => LoadA { load_type: LoadType::C },
                         _ => LoadA {
-                            addr: LoadAddr::Imm16,
+                            load_type: LoadType::Imm16,
                         }, // 0x7
                     }
                 }
@@ -283,7 +287,7 @@ impl Cpu {
             (3, _, 0x7) => Rst { address: fields.y * 8 },
 
             // Safeguard, this should never happen
-            (_, _, _) => Invalid,
+            (_, _, _) => unreachable!(),
         }
     }
 
@@ -451,6 +455,41 @@ impl Cpu {
         self.write_r16(Reg16::SP, sp);
     }
 
+    fn get_ld_address(&mut self, load_type: LoadType) -> (u8, u16) {
+
+        use LoadType::*;
+        let addr : u16;
+        let cycles: u8;
+        match load_type {
+            C => {
+                addr = 0xFF00 | self.registers.c as u16; 
+                cycles = 2;
+            } 
+            Imm8 => {
+                let imm = self.fetch16();
+                addr = 0xFF00 & imm as u16;
+                cycles = 3;
+            }
+            Imm16 => {
+                addr = self.fetch16();
+                cycles = 4;
+            }
+        }
+        (cycles, addr)
+    }
+    
+
+    fn signed_add_sp_imm8(&mut self) {
+        let val = self.fetch8(); 
+        let sp = self.registers.sp;
+
+        let half = (sp & 0x000F) + (val as u16 & 0x000F) > 0x000F;
+        let carry = (sp & 0x00FF) + (val as u16 & 0x00FF) > 0x00FF;
+
+        self.registers.sp = sp.wrapping_add_signed(val as i16);
+        self.registers.set_flags(false, false, half, carry);
+    }
+
     fn execute(&mut self, instruction: Instruction) -> u8 {
         use Instruction::*;
 
@@ -462,15 +501,16 @@ impl Cpu {
                 3
             }
             
+            // TODO - perhaps move these two to LoadA and StoreA repectively
             LdMemA { dst_addr } => {
                 let value = self.read_r8(Reg8::A);
-                let address = self.fetch16();
+                let address = self.read_r16(dst_addr);
                 self.bus.write(address, value);
                 4
             }
 
             LdAMem { src_addr } => {
-                let address = self.fetch16();
+                let address = self.read_r16(src_addr);
                 let value = self.bus.read(address);
                 self.write_r8(Reg8::A, value);
                 4
@@ -685,13 +725,13 @@ impl Cpu {
                 use CBInstruction::*;
                 match cb_instr {
 
-                    CBRot { op, operand } => {
+                    Rot { op, operand } => {
                         let val = self.rot_shift_r8(operand, op);
                         self.write_r8(operand, val);
                         if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
                     }
 
-                    CBBit { bit_index, operand } => {
+                    Bit { bit_index, operand } => {
                         let mut val = self.read_r8(operand);
                         let mask = 0b1 << bit_index;
                         let zero = (val & mask) == 0;
@@ -700,27 +740,80 @@ impl Cpu {
                         if matches!(operand, Reg8::HLMem) { 3 } else { 2 }
                     }
 
-                    CBRes { bit_index, operand } => {
+                    Res { bit_index, operand } => {
                         let mut val = self.read_r8(operand);
                         let mask = 0b1 << bit_index;
                         val = val & !mask;
                         if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
                     }
 
-                    CBSet { bit_index, operand } => {
+                    Set { bit_index, operand } => {
                         let mut val = self.read_r8(operand);
                         let mask = 0b1 << bit_index;
                         val = val | mask;
                         if matches!(operand, Reg8::HLMem) { 4 } else { 2 }
                     }
 
-                    Invalid => 0,
+                    Invalid => unreachable!(),
                 }
             }
 
+            LoadA { load_type } => {
+                let cycles;
+                let address;
+                (cycles, address) = self.get_ld_address(load_type);
+
+                let val = self.read_r8(Reg8::A);
+                self.bus.write(address, val);
+                cycles
+            } 
+
+            StoreA { load_type } => {
+                let cycles;
+                let address;
+                (cycles, address) = self.get_ld_address(load_type);
+
+                let val = self.bus.read(address);
+                self.write_r8(Reg8::A, val);
+                cycles
+            }
+
+            AddSpImm8 => {
+                self.signed_add_sp_imm8();
+                4
+            }
+
+            LdHlSpImm8 => {
+                self.signed_add_sp_imm8();
+                self.registers.set_hl(self.registers.sp);
+                3
+            }
+
+            LdSpHl => {
+                self.registers.sp = self.registers.hl();
+                2
+            }
+
+            Di => {
+                self.flag_ime = false;
+                1
+            }
+
+            Ei => {
+                self.pending_ime = true;
+                1
+            }
+
+            Invalid => {
+                self.locked = true;
+                0
+            }
         }
     }
 }
+
+
+
 
 struct Registers {
     a: u8,
@@ -964,7 +1057,7 @@ impl RotShiftOp {
 }
 
 #[derive(Clone, Copy)]
-enum LoadAddr {
+enum LoadType {
     C,
     Imm8,
     Imm16,
@@ -1014,8 +1107,8 @@ enum Instruction {
 
     CbInst,
 
-    StoreA { addr: LoadAddr },
-    LoadA { addr: LoadAddr },
+    LoadA { load_type: LoadType },
+    StoreA { load_type: LoadType },
 
     AddSpImm8,
     LdHlSpImm8,
@@ -1028,10 +1121,10 @@ enum Instruction {
 }
 
 enum CBInstruction {
-    CBRot { op: RotShiftOp, operand: Reg8 },
-    CBBit { bit_index: u8, operand: Reg8 },
-    CBRes { bit_index: u8, operand: Reg8 },
-    CBSet { bit_index: u8, operand: Reg8 },
+    Rot { op: RotShiftOp, operand: Reg8 },
+    Bit { bit_index: u8, operand: Reg8 },
+    Res { bit_index: u8, operand: Reg8 },
+    Set { bit_index: u8, operand: Reg8 },
 
     Invalid,
 }
