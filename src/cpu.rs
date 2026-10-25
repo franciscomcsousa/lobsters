@@ -26,6 +26,8 @@ impl Cpu {
 
     pub fn step(&mut self) -> u8 {
         
+        // Gameboy doctor printing format
+        // TODO - set this an optional flag
         let r = &self.registers;
         let pc = r.pc;
         println!(
@@ -353,40 +355,39 @@ impl Cpu {
         let zero;
         let mut sub = false;
         let mut half = false;
-        let mut carry = false;
+        let carry_in = self.registers.flag_carry();
+        let mut carry_out = false;
 
         match op {
             Add => {
-                (result, carry) = lhs.overflowing_add(rhs);
+                (result, carry_out) = lhs.overflowing_add(rhs);
                 half = (lhs & 0x0F) + (rhs & 0x0F) > 0x0F;
             }
             Adc => {
-                let carry_add = carry as u8;
                 let c1;
                 let c2;
 
                 (result, c1) = lhs.overflowing_add(rhs);
-                (result, c2) = result.overflowing_add(carry_add);
+                (result, c2) = result.overflowing_add(carry_in as u8);
 
-                carry = c1 || c2;
-                half = (lhs & 0x0F) + (rhs & 0x0F) > 0x0F;
+                carry_out = c1 || c2;
+                half = (lhs & 0x0F) + (rhs & 0x0F) + (carry_in as u8) > 0x0F;
             }
             Sub => {
-                (result, carry) = lhs.overflowing_sub(rhs);
+                (result, carry_out) = lhs.overflowing_sub(rhs);
                 sub = true;
                 half = (rhs & 0x0F) > (lhs & 0x0F);
             }
             Sbc => {
-                let carry_sub = carry as u8;
                 let c1;
                 let c2;
 
                 (result, c1) = lhs.overflowing_sub(rhs);
-                (result, c2) = result.overflowing_sub(carry_sub);
+                (result, c2) = result.overflowing_sub(carry_in as u8);
 
-                carry = c1 || c2;
+                carry_out = c1 || c2;
                 sub = true;
-                half = (rhs & 0x0F) + carry_sub > (lhs & 0x0F);
+                half = (rhs & 0x0F) + (carry_in as u8) > (lhs & 0x0F);
             }
             And => {
                 result = lhs & rhs;
@@ -399,7 +400,7 @@ impl Cpu {
                 result = lhs | rhs;
             }
             Cp => {
-                (result, carry) = lhs.overflowing_sub(rhs);
+                (result, carry_out) = lhs.overflowing_sub(rhs);
                 sub = true;
                 half = (rhs & 0x0F) > (lhs & 0x0F);
             }
@@ -407,7 +408,7 @@ impl Cpu {
 
         zero = result == 0;
 
-        self.registers.set_flags(zero, sub, half, carry);
+        self.registers.set_flags(zero, sub, half, carry_out);
         match op {
             Cp => lhs,  // ComPare only sets flags, returns lhs
             _ => result,
@@ -572,6 +573,7 @@ impl Cpu {
             }
 
             IncR16 { operand } => {
+                // TODO - care for [HL] cycles
                 let val = self.read_r16(operand);
                 self.write_r16(operand, val.wrapping_add(1));
                 
@@ -579,14 +581,23 @@ impl Cpu {
             }
 
             DecR16 { operand } => {
+                // TODO - care for [HL] cycles
                 let val = self.read_r16(operand);
                 self.write_r16(operand, val.wrapping_sub(1));
                 2
             }
 
             AddHlR16 { operand } => {
-                let val = self.read_r16(operand) + self.read_r16(Reg16::HL);
+                let lhs = self.read_r16(Reg16::HL);
+                let rhs = self.read_r16(operand);
+
+                let (val, carry) = lhs.overflowing_add(rhs);
+                let half = (lhs & 0x0FFF) + (rhs & 0x0FFF) > 0x0FFF;
+                let zero = self.registers.flag_zero();
+
+                self.registers.set_flags(zero, false, half, carry);
                 self.write_r16(Reg16::HL, val);
+
                 2
             }
 
@@ -729,8 +740,8 @@ impl Cpu {
             }
 
             JpImm16 { cond } => {
+                let addr = self.fetch16();
                 if self.match_condition(cond) {
-                    let addr = self.fetch16();
                     self.registers.pc = addr;
                     4
                 } else {

@@ -18,18 +18,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = std::path::Path::new(&args[1]);
 
     // TODO - check if its a valid ROM extention and check integrity of ROM (somehow?)
-    // if path.is_file() {
-    //     println!("Using ROM on path {}", path.display());
-    // } else {
-    //     eprintln!("Invalid ROM path: {}", path.display());
-    //     exit(1);
-    // }
+    if path.is_file() {
+        eprintln!("Using ROM on path {}", path.display());
+    } else {
+        eprintln!("Invalid ROM path: {}", path.display());
+        exit(1);
+    }
 
     let mut space = memory_bus::MemoryBus::new();
     space.load_rom(path)?;
 
     // println!("Starting Address Space: {:X?}", space);
 
+    // TODO
     // let mut screen = ppu::Screen::new();
     // screen.render_loop();
     
@@ -42,8 +43,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         }        
         total_cycles += cycles as u64;
     }
-
-    // println!("Final Address Space: {:X?}", space);
 
     Ok(())
 }
