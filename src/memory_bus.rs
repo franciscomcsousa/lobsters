@@ -1,6 +1,6 @@
 use std::{error::Error, fs, path::Path};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryBus {
     address_space: [u8; 0x10000],
 }
@@ -31,12 +31,24 @@ impl MemoryBus {
     }
 
     pub fn write(&mut self, address: u16, value: u8) {
+        // NOTE - temporary serial port
+        match address {
+            0xFF02 if value == 0x81 => {
+                eprint!("{}", self.address_space[0xFF01] as char);
+                use std::io::Write;
+                std::io::stdout().flush().unwrap();
+            }
+            _ => {}
+        }
         // TODO - check for forbidden addresses
         self.address_space[address as usize] = value;
     }
 
     pub fn read(&self, address: u16) -> u8 {
         // TODO - check for forbidden reads perhaps
-        self.address_space[address as usize]
+        match address {
+            0xFF44 => 0x90, // NOTE - hardcoded for gameboy doctor while PPU not finished
+            _ => self.address_space[address as usize]
+        }
     }
 }
